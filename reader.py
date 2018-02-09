@@ -6,7 +6,7 @@ import tensorflow as tf
 from tqdm import tqdm, trange
 
 tf.app.flags.DEFINE_integer("rnn_timesteps", 10, "Number of timesteps used in rnn.")
-tf.app.flags.DEFINE_string("data_folder", 'bool_norm', 'Train tfrecord folder')
+tf.app.flags.DEFINE_string("data_folder", '/dfs/scratch0/mvc/test/snap_tf/bool_norm', 'Train tfrecord folder')
 tf.app.flags.DEFINE_string("meta_file", 'meta_counts.pkl', "pickle file for metadata on tfrecords")
 
 FLAGS = tf.app.flags.FLAGS
