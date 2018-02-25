@@ -10,14 +10,14 @@ from reader import Reader
 tf.app.flags.DEFINE_integer("batch_size", 32, "Batch size to use during training.")
 tf.app.flags.DEFINE_string("hidden_layers", '', 'Comma separated hidden layer sizes')
 tf.app.flags.DEFINE_integer("rnn_units", 128, "Number of GRU units to use")
-tf.app.flags.DEFINE_bool("bool_mask", False, "Whether to use a boolean mask for boolean values for sigmoid ce")
+tf.app.flags.DEFINE_integer("future_timestep", 1, "What number timestep in the future to try to predict")
 tf.app.flags.DEFINE_float("learning_rate", 1e-3, "learning rate during training.")
 tf.app.flags.DEFINE_integer("epochs", 10, "Number of epochs to train for")
+tf.app.flags.DEFINE_string('graph', './graphs', 'Where to save graph/tensorboard output')
 tf.app.flags.DEFINE_string("save_path", 'save/bool_norm_large.ckpt', "where to save model weights")
 tf.app.flags.DEFINE_bool("restore", True, "Whether to restore from save_path")
 tf.app.flags.DEFINE_bool("validate", True, "Whether to run validation")
 tf.app.flags.DEFINE_bool("profile", False, "Whether to profile")
-
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -58,12 +58,12 @@ class VWModel(object):
             return outputs, final_state
 
 
+        if self.flags.future_timestep > 1:
+            frame_values = frame_values[:,:-self.flags.future_timestep+1]
+
         num_units = self.flags.rnn_units
-        use_chunking = False
-        use_frames = True
         with tf.variable_scope("simple_model", reuse=tf.AUTO_REUSE):
             def predict(time_values):
-                # time_values, expected = dense_values[:, i:i+self.rnn_timesteps], dense_values[:, i+self.rnn_timesteps+1]
                 _, state = stacked_lstm(time_values, num_units)
                 hidden_sizes = self.flags.hidden_layers.split(',')
                 if len(hidden_sizes) == 1 and not hidden_sizes[0]:
@@ -84,22 +84,12 @@ class VWModel(object):
             predictions = predict(self.frames)
             self.compact_predictions = predictions
             self.predicted = tf.reshape(predictions, [-1, frame_values.get_shape()[1], frame_values.get_shape()[-1]])
-            self.expected = dense_values[:,self.rnn_timesteps:]
+            self.expected = dense_values[:,self.rnn_timesteps+self.flags.future_timestep-1:]
                 
         self.bool_loss = tf.constant(0)
         self.loss = 0.0
         square_loss = tf.squared_difference(self.predicted, self.expected)
-        if self.flags.bool_mask:
-            with open(os.path.join(self.flags.data_folder, 'bool_sensor_mask.pkl')) as handle:
-                mask = pickle.load(handle)
-            tf_mask = tf.constant(mask)
-            mask_as_float = tf.cast(tf_mask, tf.float32)
-            float_mask = tf.constant(np.logical_not(mask), tf.float32)
-            sigmoid = tf.nn.sigmoid_cross_entropy_with_logits(labels=self.expected, logits=self.predicted)
-            self.bool_loss = tf.reduce_mean(sigmoid*mask_as_float)
-            self.loss += self.bool_loss
-            # square_loss *= inverse_mask
-        elif self.flags.split_bool:
+        if self.flags.split_bool:
             pred, expect = [(x[:,:,:self.bool_count], x[:,:,self.bool_count:]) for x in (self.predicted, self.expected)]
             square_loss = tf.squared_difference(pred[1], expect[1])
             self.bool_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=expect[0], logits=pred[0]))
@@ -107,10 +97,8 @@ class VWModel(object):
             self.loss += self.bool_loss
 
         self.loss += tf.reduce_mean(square_loss)
-        # self.loss = tf.norm(self.predicted - self.expected)
         self.mse = tf.losses.mean_squared_error(self.expected, self.predicted)
         self.abs_diff = tf.losses.absolute_difference(self.expected, self.predicted)
-        # self.rmse = tf.metrics.root_mean_squared_error(self.expected, self.predicted)
         self.opt = tf.train.AdamOptimizer().minimize(self.loss)
         self.summary = self.summary_op()
         self.val_summary = self.val_summary_op()
@@ -119,29 +107,24 @@ class VWModel(object):
         with tf.name_scope("train_summary"):
             tf.summary.scalar("loss", self.loss)
             tf.summary.scalar("bool_loss", self.bool_loss)
-            # tf.summary.scalar("loss_sq", self.loss_sq)
             tf.summary.scalar("mse", self.mse)
-            # tf.summary.scalar("rmse", self.rmse)
             tf.summary.scalar("abs_diff", self.abs_diff)
             return tf.summary.merge_all()
 
     def val_summary_op(self):
         with tf.name_scope("val_summary"):
             tf.summary.scalar("val_loss", self.loss)
-            # tf.summary.scalar("val_loss_sq", self.loss_sq)
             tf.summary.scalar("val_mse", self.mse)
-            # tf.summary.scalar("val_rmse", self.rmse)
             tf.summary.scalar("val_abs_diff", self.abs_diff)
             return tf.summary.merge_all()
 
     def setup_session(self):
         config = tf.ConfigProto(log_device_placement=True, allow_soft_placement=True)
         config.gpu_options.allow_growth = True
-        # config.gpu_options.visible_device_list="1"
         self.saver = tf.train.Saver()
 
         self.sess = tf.Session(config=config)
-        self.writer = tf.summary.FileWriter('./graphs', self.sess.graph)
+        self.writer = tf.summary.FileWriter(self.flags.graph, self.sess.graph)
 
         if self.flags.restore:
             print("Restoring weights...")
@@ -217,7 +200,6 @@ class VWModel(object):
         if self.sess is None:
             self.setup_session()
 
-        # for batch in tqdm(np.array_split(frames, len(frames)//self.flags.batch_size)):
         predict = self.sess.run(self.compact_predictions, feed_dict={self.frames: frames})
         return predict
 
