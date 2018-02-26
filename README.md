@@ -1,7 +1,7 @@
 # SnapTimeTF
 
 *reader.py* contains functions for reading from tfrecords.
-This requires data_folder to point to the correct location ("/dfs/scratch0/mvc/test/snap_tf/bool_norm").
+This requires data_folder to point to the correct location ("/dfs/scratch0/mvc/test/snap_tf/bool_norm"). (UPDATE: New data is at "/dfs/scratch0/mvc/test/snap_tf/full_split_bool")
 
 Calling *read()* will return a dense batch (raw tfrecord values), as well as framed values, which contains windows over the raw data.
 
