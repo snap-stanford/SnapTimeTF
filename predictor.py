@@ -1,53 +1,24 @@
 import tensorflow as tf
-from tqdm import tqdm, trange
 
-import numpy as np
-import os
-import pickle
+from model import Model
 
-from reader import Reader
-
-tf.app.flags.DEFINE_integer("batch_size", 32, "Batch size to use during training.")
 tf.app.flags.DEFINE_string("hidden_layers", '', 'Comma separated hidden layer sizes')
 tf.app.flags.DEFINE_integer("rnn_units", 128, "Number of GRU units to use")
+tf.app.flags.DEFINE_bool("bidir_rnn", False, "Whether to use a bidirectional rnn")
 tf.app.flags.DEFINE_integer("future_timestep", 1, "What number timestep in the future to try to predict")
 tf.app.flags.DEFINE_float("learning_rate", 1e-3, "learning rate during training.")
-tf.app.flags.DEFINE_integer("epochs", 10, "Number of epochs to train for")
-tf.app.flags.DEFINE_string('graph', './graphs', 'Where to save graph/tensorboard output')
-tf.app.flags.DEFINE_string("save_path", 'save/bool_norm_large.ckpt', "where to save model weights")
-tf.app.flags.DEFINE_bool("restore", True, "Whether to restore from save_path")
-tf.app.flags.DEFINE_bool("validate", True, "Whether to run validation")
-tf.app.flags.DEFINE_bool("profile", False, "Whether to profile")
 
 FLAGS = tf.app.flags.FLAGS
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
-
-class VWModel(object):
-    """docstring for VWModel"""
+class VWModel(Model):
+    """RNN predictions using stacked GRUs"""
     def __init__(self, flags):
-        self.flags = flags
         self.rnn_timesteps = flags.rnn_timesteps
-        self.batch_size = flags.batch_size
-        self.reader = Reader()        
-
-        self.sensor_counts, self.timestep_count = self.reader.get_shapes()
-        self.sensor_count = sum(self.sensor_counts)
-        self.bool_count = self.sensor_counts[0]
-        self.build_model()
-        self.train_steps, self.val_steps = self.reader.batch_meta_counts(self.batch_size)
-        self.sess = None
+        super(VWModel, self).__init__(flags)
 
     def build_model(self):
-        self.val = tf.placeholder_with_default(False, [], name='validation')
-        dense_values, frame_values, sensor_counts, num_timesteps = self.reader.read(self.batch_size, val=self.val)
-
-        def simple_rnn(inputs, num_units, scope=None):
-            with tf.variable_scope(scope or "simple_rnn", reuse=tf.AUTO_REUSE):
-                cell = tf.nn.rnn_cell.LSTMCell(num_units=num_units)
-                outputs, _ = tf.nn.dynamic_rnn(cell, inputs=inputs, dtype=tf.float32)
-            return outputs, _
+        dense_values, frame_values = self.dense_values, self.frame_values
 
         def stacked_lstm(inputs, num_units, scope=None):
             with tf.variable_scope(scope or "stacked_gru", reuse=tf.AUTO_REUSE):
@@ -57,6 +28,14 @@ class VWModel(object):
                 outputs, final_state = tf.nn.dynamic_rnn(stacked_cell, inputs=inputs, dtype=tf.float32)
             return outputs, final_state
 
+        def bidir_stacked_gru(inputs, num_units, scope=None):
+            with tf.variable_scope(scope or "bidir_stacked_gru", reuse=tf.AUTO_REUSE):
+                cell1 = tf.nn.rnn_cell.GRUCell(num_units=num_units)
+                cell2 = tf.nn.rnn_cell.GRUCell(num_units=num_units//2)
+                stacked_cell = tf.nn.rnn_cell.MultiRNNCell([cell1, cell2])
+                outputs, final_state = tf.nn.bidirectional_dynamic_rnn(cell_fw=stacked_cell, cell_bw=stacked_cell, inputs=inputs, dtype=tf.float32)
+            return outputs, final_state[0]
+
 
         if self.flags.future_timestep > 1:
             frame_values = frame_values[:,:-self.flags.future_timestep+1]
@@ -64,7 +43,10 @@ class VWModel(object):
         num_units = self.flags.rnn_units
         with tf.variable_scope("simple_model", reuse=tf.AUTO_REUSE):
             def predict(time_values):
-                _, state = stacked_lstm(time_values, num_units)
+                rnn_func = stacked_lstm
+                if self.flags.bidir_rnn:
+                    rnn_func = bidir_stacked_gru
+                _, state = rnn_func(time_values, num_units)
                 hidden_sizes = self.flags.hidden_layers.split(',')
                 if len(hidden_sizes) == 1 and not hidden_sizes[0]:
                     predicted =  tf.layers.dense(state[-1], time_values.get_shape().as_list()[-1], reuse=tf.AUTO_REUSE)
@@ -85,116 +67,7 @@ class VWModel(object):
             self.compact_predictions = predictions
             self.predicted = tf.reshape(predictions, [-1, frame_values.get_shape()[1], frame_values.get_shape()[-1]])
             self.expected = dense_values[:,self.rnn_timesteps+self.flags.future_timestep-1:]
-                
-        self.bool_loss = tf.constant(0)
-        self.loss = 0.0
-        square_loss = tf.squared_difference(self.predicted, self.expected)
-        if self.flags.split_bool:
-            pred, expect = [(x[:,:,:self.bool_count], x[:,:,self.bool_count:]) for x in (self.predicted, self.expected)]
-            square_loss = tf.squared_difference(pred[1], expect[1])
-            self.bool_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=expect[0], logits=pred[0]))
-            self.predicted = tf.concat([tf.nn.sigmoid(pred[0]), pred[1]], axis=-1)
-            self.loss += self.bool_loss
-
-        self.loss += tf.reduce_mean(square_loss)
-        self.mse = tf.losses.mean_squared_error(self.expected, self.predicted)
-        self.abs_diff = tf.losses.absolute_difference(self.expected, self.predicted)
-        self.opt = tf.train.AdamOptimizer().minimize(self.loss)
-        self.summary = self.summary_op()
-        self.val_summary = self.val_summary_op()
-
-    def summary_op(self):
-        with tf.name_scope("train_summary"):
-            tf.summary.scalar("loss", self.loss)
-            tf.summary.scalar("bool_loss", self.bool_loss)
-            tf.summary.scalar("mse", self.mse)
-            tf.summary.scalar("abs_diff", self.abs_diff)
-            return tf.summary.merge_all()
-
-    def val_summary_op(self):
-        with tf.name_scope("val_summary"):
-            tf.summary.scalar("val_loss", self.loss)
-            tf.summary.scalar("val_mse", self.mse)
-            tf.summary.scalar("val_abs_diff", self.abs_diff)
-            return tf.summary.merge_all()
-
-    def setup_session(self):
-        config = tf.ConfigProto(log_device_placement=True, allow_soft_placement=True)
-        config.gpu_options.allow_growth = True
-        self.saver = tf.train.Saver()
-
-        self.sess = tf.Session(config=config)
-        self.writer = tf.summary.FileWriter(self.flags.graph, self.sess.graph)
-
-        if self.flags.restore:
-            print("Restoring weights...")
-            self.saver.restore(self.sess, self.flags.save_path)
-        else:
-            self.sess.run(tf.global_variables_initializer())
-
-        self.batch_window_count = self.flags.batch_size*(self.timestep_count-self.flags.rnn_timesteps)
-
-    def train(self, steps=None):
-        self.setup_session()
-        outer = trange(self.flags.epochs)
-        
-        if steps is None:
-            steps = self.train_steps
-
-        sess_args = {}
-        if self.flags.profile:
-            sess_args = {
-                'options': tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
-                'run_metadata': tf.RunMetadata()
-            }
-        for i in outer:
-            inner = trange(steps)
-            for j in inner:
-                loss_value, mse, bool_loss, summary, _ = self.sess.run([self.loss, self.mse, self.bool_loss, self.summary, self.opt], **sess_args)
-                inner.set_description("Loss: {0}, mse: {1}, bool: {2}".format(loss_value, mse, bool_loss))
-                self.writer.add_summary(summary, global_step=(i*steps+j)*self.batch_window_count)
-                if self.flags.profile:
-                    fetched_timeline = timeline.Timeline(run_metadata.step_stats)
-                    chrome_trace = fetched_timeline.generate_chrome_trace_format()
-                    with open('timeline.json', 'w+') as f:
-                        f.write(chrome_trace)
-
-                if j != 0 and j % 100 == 0:
-                    self.saver.save(self.sess, self.flags.save_path)
-                    self.writer.flush()
-
-            self.saver.save(self.sess, self.flags.save_path)
-            self.writer.flush()
-
-            if self.flags.validate:
-                val_mse = self.validate(step_offset=i, compute_results=False)[0]
-                self.writer.flush()
-                outer.set_description("Val avg MSE: {}".format(val_mse))
-            
-
-    def validate(self, steps=None, step_offset=0, write_tensorboard=False, compute_results=True):
-        if self.sess is None:
-            self.setup_session()
-        val_mse_total = 0.0
-        if steps is None:
-            steps = self.val_steps
-        val_tqdm = trange(steps)
-        predicted, expected = [], []
-        for j in val_tqdm:
-            fd = {self.val: True}
-            if compute_results:
-                mse_value, predict_batch, expect_batch = self.sess.run([self.mse, self.predicted, self.expected], feed_dict=fd)
-                predicted.append(predict_batch)
-                expected.append(expect_batch)
-            else:
-                mse_value, summary = self.sess.run([self.mse, self.val_summary], feed_dict=fd)
-            
-            val_mse_total += mse_value
-            val_tqdm.set_description("Val Loss: {}".format(val_mse_total/(j+1)))
-            if write_tensorboard:
-                self.writer.add_summary(summary, global_step=(steps*step_offset + j)*self.batch_window_count)
-        
-        return val_mse_total/steps, predicted, expected
+    
 
     def predict(self, frames):
         if self.sess is None:
