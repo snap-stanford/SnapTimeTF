@@ -115,6 +115,10 @@ class Model(object):
 
         self.batch_window_count = self.flags.batch_size*(self.timestep_count-self.flags.rnn_timesteps)
 
+    def discard_session(self):
+        self.sess.close()
+        tf.reset_default_graph()
+
     def train(self, steps=None):
         self.setup_session()
         outer = trange(self.flags.epochs)
@@ -144,20 +148,19 @@ class Model(object):
                 outer.set_description("Val avg loss: {}".format(measured['loss']))
 
 
-    def validate(self, steps=None, step_offset=0, write_tensorboard=False, compute_results=False):
+    def validate(self, steps=None, step_offset=0, write_tensorboard=False, compute_results=False, use_validation_set=True):
         if self.sess is None:
             self.setup_session()
-        val_mse_total = 0.0
         if steps is None:
-            steps = self.val_steps
+            steps = self.val_steps if use_validation_set else self.train_steps
         val_tqdm = trange(steps)
         predicted, expected = [], []
 
         metrics = self.metrics()
         agg_metrics = collections.defaultdict(float)
+        fd = {self.val: use_validation_set}
 
         for j in val_tqdm:
-            fd = {self.val: True}
             if compute_results:
                 measured, predict_batch, expect_batch = self.sess.run([metrics, self.predicted, self.expected], feed_dict=fd)
                 predicted.append(predict_batch)

@@ -2,6 +2,8 @@ import tensorflow as tf
 
 from model import Model
 
+tf.app.flags.DEFINE_integer("future_timestep", 10, "What number timestep in the future to try to predict")
+
 FLAGS = tf.app.flags.FLAGS
 
 class Baseline(Model):
@@ -11,8 +13,8 @@ class Baseline(Model):
 
     def build_model(self):
         dense_values = self.dense_values
-        self.expected = dense_values[:,self.rnn_timesteps:]
-        prev_timestep = dense_values[:,self.rnn_timesteps-1:-1]
+        self.expected = dense_values[:,self.rnn_timesteps+self.flags.future_timestep-1:]
+        prev_timestep = dense_values[:,self.rnn_timesteps-1:-self.flags.future_timestep]
         prev_booleans, prev_floats = prev_timestep[:,:,:self.bool_count], prev_timestep[:,:,self.bool_count:]
                 
         self.mult = tf.get_variable('mult', shape=(self.bool_count, ), dtype=tf.float32, initializer=tf.ones_initializer())
