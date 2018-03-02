@@ -2,10 +2,10 @@ import tensorflow as tf
 
 from model import Model
 
-tf.app.flags.DEFINE_string("hidden_layers", '', 'Comma separated hidden layer sizes')
-tf.app.flags.DEFINE_integer("rnn_units", 128, "Number of GRU units to use")
+tf.app.flags.DEFINE_string("hidden_layers", '256', 'Comma separated hidden layer sizes')
+tf.app.flags.DEFINE_integer("rnn_units", 256, "Number of GRU units to use")
 tf.app.flags.DEFINE_bool("bidir_rnn", False, "Whether to use a bidirectional rnn")
-tf.app.flags.DEFINE_integer("future_timestep", 1, "What number timestep in the future to try to predict")
+tf.app.flags.DEFINE_integer("future_timestep", 10, "What number timestep in the future to try to predict")
 tf.app.flags.DEFINE_float("learning_rate", 1e-3, "learning rate during training.")
 
 FLAGS = tf.app.flags.FLAGS
@@ -78,7 +78,7 @@ class VWModel(Model):
 
 def main(_):
     model = VWModel(FLAGS)
-    model.train()
+    model.validate(compute_results=True, save_val=True)
 
 if __name__ == '__main__':
     tf.app.run()

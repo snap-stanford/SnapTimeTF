@@ -13,9 +13,9 @@ tf.app.flags.DEFINE_integer("epochs", 10, "Number of epochs to train for")
 tf.app.flags.DEFINE_bool("restore", True, "Whether to restore from save_path")
 tf.app.flags.DEFINE_bool("validate", True, "Whether to run validation")
 
-tf.app.flags.DEFINE_integer("cuda_device", 3, "Which gpu to run on")
+tf.app.flags.DEFINE_integer("cuda_device", 0, "Which gpu to run on")
 tf.app.flags.DEFINE_string('graph', './graphs', 'Where to save graph/tensorboard output')
-tf.app.flags.DEFINE_string("save_path", 'save/bool_norm_large.ckpt', "where to save model weights")
+tf.app.flags.DEFINE_string("save_path", 'save_overfit/bool_norm_large.ckpt', "where to save model weights")
 
 
 FLAGS = tf.app.flags.FLAGS
@@ -69,6 +69,7 @@ class Model(object):
         self.mse = tf.losses.mean_squared_error(self.expected, self.predicted)
         self.abs_diff = tf.losses.absolute_difference(self.expected, self.predicted)
         self.opt = tf.train.AdamOptimizer().minimize(self.loss)
+        self.signal_error = tf.reduce_mean(tf.reduce_mean(tf.square(self.predicted - self.expected), axis=0), axis=0)
 
 
     def setup_tensorboard(self):
@@ -81,7 +82,8 @@ class Model(object):
             'mse': self.mse,
             'l1': self.abs_diff,
             'bool_xent': self.bool_loss,
-            'float_l2': self.float_loss
+            'float_l2': self.float_loss,
+            'signal_error': self.signal_error
         }
 
     def summary_op(self):
@@ -144,7 +146,7 @@ class Model(object):
                 outer.set_description("Val avg loss: {}".format(measured['loss']))
 
 
-    def validate(self, steps=None, step_offset=0, write_tensorboard=False, compute_results=False):
+    def validate(self, steps=None, step_offset=0, write_tensorboard=False, compute_results=False, save_val=False):
         if self.sess is None:
             self.setup_session()
         val_mse_total = 0.0
@@ -173,6 +175,10 @@ class Model(object):
                 self.writer.add_summary(summary, global_step=(steps*step_offset + j)*self.batch_window_count)
         
         avg_metrics = {k: v/steps for k, v in agg_metrics.iteritems()}
+        if save_val:
+            pickle.dump(predicted, open('predicted_validate.pkl', 'wb'))
+            pickle.dump(expected, open('expected_validate.pkl', 'wb'))
+            pickle.dump(metrics, open('avg_metrics_validate.pkl', 'wb'))
         return avg_metrics, predicted, expected
         
     

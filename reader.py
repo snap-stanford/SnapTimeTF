@@ -7,9 +7,9 @@ import numpy as np
 from tqdm import tqdm, trange
 
 tf.app.flags.DEFINE_integer("rnn_timesteps", 10, "Number of timesteps used in rnn.")
-tf.app.flags.DEFINE_string("data_folder", 'bool_norm', 'Train tfrecord folder')
+tf.app.flags.DEFINE_string("data_folder", '/dfs/scratch0/mvc/test/snap_tf/full_split_bool', 'Train tfrecord folder')
 tf.app.flags.DEFINE_string("meta_file", 'meta_counts.pkl', "pickle file for metadata on tfrecords")
-tf.app.flags.DEFINE_bool("split_bool", False, "If we separate bools from floats in example")
+tf.app.flags.DEFINE_bool("split_bool", True, "If we separate bools from floats in example")
 
 FLAGS = tf.app.flags.FLAGS
 
