@@ -181,7 +181,7 @@ class Model(object):
         if save_val:
             pickle.dump(predicted, open('predicted_validate.pkl', 'wb'))
             pickle.dump(expected, open('expected_validate.pkl', 'wb'))
-            pickle.dump(metrics, open('avg_metrics_validate.pkl', 'wb'))
+            pickle.dump(avg_metrics, open('avg_metrics_validate.pkl', 'wb'))
         return avg_metrics, predicted, expected
         
     
