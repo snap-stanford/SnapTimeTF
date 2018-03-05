@@ -112,10 +112,19 @@ class Reader(object):
         return concat_values, framed_values, sizes, num_timesteps
 
 
-    def dataset_batch(self, filenames, batch_size, parallel=16, shape=None):
+    def dataset_batch(self, filenames, batch_size, shuffle, parallel=32, buffer_size=100, shape=None):
         dataset = tf.data.TFRecordDataset(filenames).repeat()
+        if shuffle:
+            dataset = dataset.shuffle(buffer_size=10)
+        # dataset = tf.cond(shuffle, lambda: dataset.shuffle(buffer_size=10), lambda: dataset)
+        # can't do the above commented line because they come back with different types
+        
+        dataset = dataset.repeat()
         parser = lambda ex: self.parse_example(ex, shape)
         dataset = dataset.map(parser, num_parallel_calls=parallel)
+        if shuffle:
+            dataset = dataset.shuffle(buffer_size=buffer_size)
+        dataset = dataset.prefetch(buffer_size=buffer_size)
         dataset = dataset.batch(batch_size)
         iterator = dataset.make_one_shot_iterator()
         results = iterator.get_next()
@@ -133,8 +142,8 @@ class Reader(object):
         return [1+x//batch_size for x in self.meta_counts()]
 
 
-    def read(self, batch_size, val, shape=None):
-        train_batch, val_batch = [self.dataset_batch(f, batch_size, shape=shape) for f in (self.train_records, self.val_records)]
+    def read(self, batch_size, val, shuffle, shape=None):
+        train_batch, val_batch = [self.dataset_batch(f, batch_size, shuffle, shape=shape) for f in (self.train_records, self.val_records)]
         dense_values, frame_values, num_sensors, num_timesteps = tf.cond(val, lambda: val_batch, lambda: train_batch)
         return dense_values, frame_values, num_sensors, num_timesteps
 

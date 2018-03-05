@@ -12,6 +12,7 @@ tf.app.flags.DEFINE_integer("batch_size", 32, "Batch size to use during training
 tf.app.flags.DEFINE_integer("epochs", 10, "Number of epochs to train for")
 tf.app.flags.DEFINE_bool("restore", True, "Whether to restore from save_path")
 tf.app.flags.DEFINE_bool("validate", True, "Whether to run validation")
+tf.app.flags.DEFINE_bool("shuffle", True, "Whether to shuffle examples")
 
 tf.app.flags.DEFINE_integer("cuda_device", 0, "Which gpu to run on")
 tf.app.flags.DEFINE_string('graph', './graphs', 'Where to save graph/tensorboard output')
@@ -48,7 +49,7 @@ class Model(object):
 
     def _setup_model(self):
         self.val = tf.placeholder_with_default(False, [], name='validation')
-        self.dense_values, self.frame_values, sensor_counts, num_timesteps = self.reader.read(self.batch_size, val=self.val)
+        self.dense_values, self.frame_values, sensor_counts, num_timesteps = self.reader.read(self.batch_size, shuffle=self.flags.shuffle, val=self.val)
         self.predicted, self.expected = None, None
         # Note: override self.predicted and self.expected in build_model
 
@@ -60,6 +61,7 @@ class Model(object):
         if self.flags.split_bool:
             pred, expect = [(x[:,:,:self.bool_count], x[:,:,self.bool_count:]) for x in (self.predicted, self.expected)]
             square_loss = tf.squared_difference(pred[1], expect[1])
+            # square_loss = tf.losses.absolute_difference(expect[1], pred[1])
             self.bool_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=expect[0], logits=pred[0]))
             self.predicted = tf.concat([tf.nn.sigmoid(pred[0]), pred[1]], axis=-1)
             self.loss += self.bool_loss
@@ -92,6 +94,7 @@ class Model(object):
             tf.summary.scalar("bool_loss", self.bool_loss)
             tf.summary.scalar("mse", self.mse)
             tf.summary.scalar("abs_diff", self.abs_diff)
+            tf.summary.scalar('float_l2', self.float_loss)
             return tf.summary.merge_all()
 
     def val_summary_op(self):
@@ -99,10 +102,11 @@ class Model(object):
             tf.summary.scalar("val_loss", self.loss)
             tf.summary.scalar("val_mse", self.mse)
             tf.summary.scalar("val_abs_diff", self.abs_diff)
+            tf.summary.scalar('float_l2', self.float_loss)
             return tf.summary.merge_all()
 
     def setup_session(self):
-        config = tf.ConfigProto(log_device_placement=True, allow_soft_placement=True)
+        config = tf.ConfigProto(log_device_placement=False, allow_soft_placement=True)
         config.gpu_options.allow_growth = True
         self.saver = tf.train.Saver()
 
@@ -134,7 +138,7 @@ class Model(object):
             inner = trange(steps)
             for j in inner:
                 measured, summary, _ = self.sess.run([metrics, self.summary, self.opt])
-                inner.set_description("Loss: {0:0.5f}, float l2: {1:0.5f}, bool: {2:0.2f}".format(*[measured[k] for k in ['loss', 'float_l2', 'bool_xent']])) 
+                inner.set_description("Loss: {0:0.5f}, float l2: {1:0.3f}, bool: {2:0.5f}".format(*[measured[k] for k in ['loss', 'float_l2', 'bool_xent']])) 
                 self.writer.add_summary(summary, global_step=(i*steps+j)*self.batch_window_count)
 
                 if j != 0 and j % 100 == 0:
