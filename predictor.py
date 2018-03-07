@@ -2,11 +2,13 @@ import tensorflow as tf
 
 from model import Model
 
-tf.app.flags.DEFINE_string("hidden_layers", '256', 'Comma separated hidden layer sizes')
-tf.app.flags.DEFINE_integer("rnn_units", 256, "Number of GRU units to use")
+tf.app.flags.DEFINE_string("hidden_layers", '', 'Comma separated hidden layer sizes')
+tf.app.flags.DEFINE_integer("rnn_units", 128, "Number of GRU units to use")
 tf.app.flags.DEFINE_bool("bidir_rnn", False, "Whether to use a bidirectional rnn")
+tf.app.flags.DEFINE_bool("stack_cells", False, "Whether to use stacked rnn cells")
+tf.app.flags.DEFINE_bool("use_cell_state", True, "Whether to use last rnn state for prediction (otherwise, uses output from rnn)")
 tf.app.flags.DEFINE_integer("future_timestep", 10, "What number timestep in the future to try to predict")
-tf.app.flags.DEFINE_float("learning_rate", 1e-3, "learning rate during training.")
+
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -20,21 +22,24 @@ class VWModel(Model):
     def build_model(self):
         dense_values, frame_values = self.dense_values, self.frame_values
 
-        def stacked_lstm(inputs, num_units, scope=None):
-            with tf.variable_scope(scope or "stacked_gru", reuse=tf.AUTO_REUSE):
+        def cell(num_units):
+            if self.flags.stack_cells:
                 cell1 = tf.nn.rnn_cell.GRUCell(num_units=num_units)
                 cell2 = tf.nn.rnn_cell.GRUCell(num_units=num_units//2)
-                stacked_cell = tf.nn.rnn_cell.MultiRNNCell([cell1, cell2])
-                outputs, final_state = tf.nn.dynamic_rnn(stacked_cell, inputs=inputs, dtype=tf.float32)
+                return tf.nn.rnn_cell.MultiRNNCell([cell1, cell2])
+            else:
+                return tf.nn.rnn_cell.GRUCell(num_units=num_units)
+
+        def forward_gru(inputs, num_units, scope=None):
+            with tf.variable_scope(scope or "stacked_gru", reuse=tf.AUTO_REUSE):
+                outputs, final_state = tf.nn.dynamic_rnn(cell(num_units), inputs=inputs, dtype=tf.float32)
             return outputs, final_state
 
-        def bidir_stacked_gru(inputs, num_units, scope=None):
+        def bidir_gru(inputs, num_units, scope=None):
             with tf.variable_scope(scope or "bidir_stacked_gru", reuse=tf.AUTO_REUSE):
-                cell1 = tf.nn.rnn_cell.GRUCell(num_units=num_units)
-                cell2 = tf.nn.rnn_cell.GRUCell(num_units=num_units//2)
-                stacked_cell = tf.nn.rnn_cell.MultiRNNCell([cell1, cell2])
+                stacked_cell = cell(num_units)
                 outputs, final_state = tf.nn.bidirectional_dynamic_rnn(cell_fw=stacked_cell, cell_bw=stacked_cell, inputs=inputs, dtype=tf.float32)
-            return outputs, final_state[0]
+            return outputs[0], final_state[0]
 
 
         if self.flags.future_timestep > 1:
@@ -43,16 +48,21 @@ class VWModel(Model):
         num_units = self.flags.rnn_units
         with tf.variable_scope("simple_model", reuse=tf.AUTO_REUSE):
             def predict(time_values):
-                rnn_func = stacked_lstm
+                rnn_func = forward_gru
                 if self.flags.bidir_rnn:
-                    rnn_func = bidir_stacked_gru
-                _, state = rnn_func(time_values, num_units)
+                    rnn_func = bidir_gru
+                outputs, state = rnn_func(time_values, num_units)
+
+                rnn_outputs = state # TODO: state[-1]?
+                if not self.flags.use_cell_state:
+                    rnn_outputs = outputs[:,-1]
+
                 hidden_sizes = self.flags.hidden_layers.split(',')
                 if len(hidden_sizes) == 1 and not hidden_sizes[0]:
-                    predicted =  tf.layers.dense(state[-1], time_values.get_shape().as_list()[-1], reuse=tf.AUTO_REUSE)
+                    predicted =  tf.layers.dense(rnn_outputs, time_values.get_shape().as_list()[-1], reuse=tf.AUTO_REUSE)
                 else:
                     hidden_sizes = map(int, hidden_sizes)
-                    layers = [state[-1]]
+                    layers = [rnn_outputs]
                     for i, num_hidden in enumerate(hidden_sizes):
                         with tf.variable_scope("dense{}".format(i)):
                             layers.append(tf.layers.dense(layers[-1], num_hidden, activation=tf.nn.relu, reuse=tf.AUTO_REUSE))
@@ -78,7 +88,7 @@ class VWModel(Model):
 
 def main(_):
     model = VWModel(FLAGS)
-    model.validate(compute_results=True, save_val=True)
+    model.train()
 
 if __name__ == '__main__':
     tf.app.run()
