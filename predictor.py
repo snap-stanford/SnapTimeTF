@@ -1,16 +1,16 @@
 import tensorflow as tf
 
-from model import Model
+from model import *
 
 tf.app.flags.DEFINE_string("hidden_layers", '', 'Comma separated hidden layer sizes')
 tf.app.flags.DEFINE_integer("rnn_units", 128, "Number of GRU units to use")
 tf.app.flags.DEFINE_bool("bidir_rnn", False, "Whether to use a bidirectional rnn")
 tf.app.flags.DEFINE_bool("stack_cells", False, "Whether to use stacked rnn cells")
-tf.app.flags.DEFINE_bool("use_cell_state", True, "Whether to use last rnn state for prediction (otherwise, uses output from rnn)")
+tf.app.flags.DEFINE_bool("use_cell_state", False, "Whether to use last rnn state for prediction (otherwise, uses output from rnn)")
 tf.app.flags.DEFINE_integer("future_timestep", 10, "What number timestep in the future to try to predict")
 
 
-FLAGS = tf.app.flags.FLAGS
+FLAGS = tf.flags.FLAGS
 
 
 class VWModel(Model):
@@ -53,9 +53,9 @@ class VWModel(Model):
                     rnn_func = bidir_gru
                 outputs, state = rnn_func(time_values, num_units)
 
-                rnn_outputs = state # TODO: state[-1]?
-                if not self.flags.use_cell_state:
-                    rnn_outputs = outputs[:,-1]
+                # rnn_outputs = state # TODO: state[-1]?
+                # if not self.flags.use_cell_state:
+                rnn_outputs = outputs[:,-1]
 
                 hidden_sizes = self.flags.hidden_layers.split(',')
                 if len(hidden_sizes) == 1 and not hidden_sizes[0]:

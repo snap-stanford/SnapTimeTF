@@ -10,6 +10,7 @@ tf.app.flags.DEFINE_integer("rnn_timesteps", 10, "Number of timesteps used in rn
 tf.app.flags.DEFINE_string("data_folder", '/dfs/scratch0/mvc/test/snap_tf/full_split_bool', 'Train tfrecord folder')
 tf.app.flags.DEFINE_string("meta_file", 'meta_counts.pkl', "pickle file for metadata on tfrecords")
 tf.app.flags.DEFINE_bool("split_bool", True, "If we separate bools from floats in example")
+tf.app.flags.DEFINE_bool("shuffle", True, "Whether to shuffle examples")
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -48,9 +49,9 @@ class Reader(object):
 
     def get_sizes(self, features):
         if FLAGS.split_bool:
-            return [tf.cast(features['num_bools'], tf.int64), tf.cast(features['num_floats'], tf.int64)]
+            return tf.stack([tf.cast(features['num_bools'], tf.int64), tf.cast(features['num_floats'], tf.int64)])
         else:
-            return [tf.cast(features['num_sensors'], tf.int64)]
+            return tf.stack([tf.cast(features['num_sensors'], tf.int64)])
 
     def read_and_decode(self, filename_queue, num_examples=1):
         '''Deprecated, currently only used to get shapes ahead of time'''
@@ -112,18 +113,21 @@ class Reader(object):
         return concat_values, framed_values, sizes, num_timesteps
 
 
-    def dataset_batch(self, filenames, batch_size, shuffle, parallel=32, buffer_size=100, shape=None):
-        dataset = tf.data.TFRecordDataset(filenames).repeat()
-        if shuffle:
-            dataset = dataset.shuffle(buffer_size=10)
+    def dataset_batch(self, filenames, batch_size, parallel=32, buffer_size=1000, shape=None):
+        if FLAGS.shuffle:
+            dataset = tf.data.Dataset.from_tensor_slices(filenames).interleave(tf.data.TFRecordDataset, cycle_length=len(filenames))
+        else:
+            dataset = tf.data.TFRecordDataset(filenames)
         # dataset = tf.cond(shuffle, lambda: dataset.shuffle(buffer_size=10), lambda: dataset)
         # can't do the above commented line because they come back with different types
         
-        dataset = dataset.repeat()
         parser = lambda ex: self.parse_example(ex, shape)
         dataset = dataset.map(parser, num_parallel_calls=parallel)
-        if shuffle:
-            dataset = dataset.shuffle(buffer_size=buffer_size)
+        if FLAGS.shuffle:
+            # dataset = dataset.shuffle(buffer_size=buffer_size)
+            dataset = dataset.apply(tf.contrib.data.shuffle_and_repeat(buffer_size=buffer_size))
+        else:
+            dataset = dataset.repeat()
         dataset = dataset.prefetch(buffer_size=buffer_size)
         dataset = dataset.batch(batch_size)
         iterator = dataset.make_one_shot_iterator()
@@ -142,8 +146,8 @@ class Reader(object):
         return [1+x//batch_size for x in self.meta_counts()]
 
 
-    def read(self, batch_size, val, shuffle, shape=None):
-        train_batch, val_batch = [self.dataset_batch(f, batch_size, shuffle, shape=shape) for f in (self.train_records, self.val_records)]
+    def read(self, batch_size, val, shape=None):
+        train_batch, val_batch = [self.dataset_batch(f, batch_size, shape=shape) for f in (self.train_records, self.val_records)]
         dense_values, frame_values, num_sensors, num_timesteps = tf.cond(val, lambda: val_batch, lambda: train_batch)
         return dense_values, frame_values, num_sensors, num_timesteps
 

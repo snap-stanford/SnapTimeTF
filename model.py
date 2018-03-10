@@ -10,16 +10,15 @@ from reader import Reader
 
 tf.app.flags.DEFINE_integer("batch_size", 32, "Batch size to use during training.")
 tf.app.flags.DEFINE_integer("epochs", 10, "Number of epochs to train for")
-tf.app.flags.DEFINE_bool("restore", True, "Whether to restore from save_path")
+tf.app.flags.DEFINE_bool("restore", False, "Whether to restore from save_path")
 tf.app.flags.DEFINE_bool("validate", True, "Whether to run validation")
-tf.app.flags.DEFINE_bool("shuffle", True, "Whether to shuffle examples")
 
-tf.app.flags.DEFINE_integer("cuda_device", 0, "Which gpu to run on")
+tf.app.flags.DEFINE_integer("cuda_device", 3, "Which gpu to run on")
 tf.app.flags.DEFINE_string('graph', './graphs', 'Where to save graph/tensorboard output')
-tf.app.flags.DEFINE_string("save_path", 'save_overfit/bool_norm_large.ckpt', "where to save model weights")
+tf.app.flags.DEFINE_string("save_path", 'save/bool_norm_large.ckpt', "where to save model weights")
 
 
-FLAGS = tf.app.flags.FLAGS
+FLAGS = tf.flags.FLAGS
 
 
 class Model(object):
@@ -49,8 +48,9 @@ class Model(object):
 
     def _setup_model(self):
         self.val = tf.placeholder_with_default(False, [], name='validation')
-        self.dense_values, self.frame_values, sensor_counts, num_timesteps = self.reader.read(self.batch_size, shuffle=self.flags.shuffle, val=self.val)
+        self.dense_values, self.frame_values, sensor_counts, num_timesteps = self.reader.read(self.batch_size, val=self.val)
         self.predicted, self.expected = None, None
+        self.global_step_tensor = tf.Variable(0, trainable=False, name='global_step')
         # Note: override self.predicted and self.expected in build_model
 
 
@@ -71,7 +71,6 @@ class Model(object):
         self.mse = tf.losses.mean_squared_error(self.expected, self.predicted)
         self.abs_diff = tf.losses.absolute_difference(self.expected, self.predicted)
         self.opt = tf.train.AdamOptimizer().minimize(self.loss)
-        self.signal_error = tf.reduce_mean(tf.reduce_mean(tf.square(self.predicted - self.expected), axis=0), axis=0)
 
 
     def setup_tensorboard(self):
@@ -84,8 +83,7 @@ class Model(object):
             'mse': self.mse,
             'l1': self.abs_diff,
             'bool_xent': self.bool_loss,
-            'float_l2': self.float_loss,
-            'signal_error': self.signal_error
+            'float_l2': self.float_loss
         }
 
     def summary_op(self):
@@ -137,9 +135,9 @@ class Model(object):
         for i in outer:
             inner = trange(steps)
             for j in inner:
-                measured, summary, _ = self.sess.run([metrics, self.summary, self.opt])
+                measured, summary, global_step, _ = self.sess.run([metrics, self.summary, self.global_step_tensor, self.opt])
                 inner.set_description("Loss: {0:0.5f}, float l2: {1:0.3f}, bool: {2:0.5f}".format(*[measured[k] for k in ['loss', 'float_l2', 'bool_xent']])) 
-                self.writer.add_summary(summary, global_step=(i*steps+j)*self.batch_window_count)
+                self.writer.add_summary(summary, global_step=global_step)
 
                 if j != 0 and j % 100 == 0:
                     self.saver.save(self.sess, self.flags.save_path)
@@ -153,7 +151,8 @@ class Model(object):
                 self.writer.flush()
                 outer.set_description("Val avg loss: {}".format(measured['loss']))
 
-    def validate(self, steps=None, step_offset=0, write_tensorboard=False, compute_results=False, use_validation_set=True, save_val=False):
+
+    def validate(self, steps=None, step_offset=0, write_tensorboard=False, compute_results=False, use_validation_set=True):
         if self.sess is None:
             self.setup_session()
         if steps is None:
@@ -171,21 +170,17 @@ class Model(object):
                 predicted.append(predict_batch)
                 expected.append(expect_batch)
             else:
-                measured, summary = self.sess.run([metrics, self.val_summary], feed_dict=fd)
+                measured, summary, global_step = self.sess.run([metrics, self.val_summary, self.global_step_tensor], feed_dict=fd)
+                if write_tensorboard:
+                    self.writer.add_summary(summary, global_step=global_step)
             
-            for name, value in measured.iteritems():
+            for name, value in measured.items():
                 agg_metrics[name] += value
 
             val_tqdm.set_description("Val Loss: {}".format(agg_metrics['loss']/(j+1)))
-            if write_tensorboard:
-                self.writer.add_summary(summary, global_step=(steps*step_offset + j)*self.batch_window_count)
+            
         
-        avg_metrics = {k: v/steps for k, v in agg_metrics.iteritems()}
-        
-        if save_val:
-            pickle.dump(predicted, open('predicted_validate.pkl', 'wb'))
-            pickle.dump(expected, open('expected_validate.pkl', 'wb'))
-            pickle.dump(avg_metrics, open('avg_metrics_validate.pkl', 'wb'))
+        avg_metrics = {k: v/steps for k, v in agg_metrics.items()}
         return avg_metrics, predicted, expected
         
     
