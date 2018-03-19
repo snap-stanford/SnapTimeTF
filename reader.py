@@ -19,6 +19,12 @@ class Reader(object):
     def __init__(self, data_folder=None):
         if data_folder is None:
             data_folder = FLAGS.data_folder
+        self.future_kv = {}
+        future_file_path = os.path.join(FLAGS.data_folder, 'future_meta.pkl')
+        if os.path.exists(future_file_path):
+            with open(future_file_path, 'rb') as f:
+                self.future_kv = pickle.load(f)
+
         train_folder, val_folder = [os.path.join(data_folder, s) for s in ('train', 'val')]
         self.train_records, self.val_records =\
             [glob.glob(f + '/*.tfrecord') for f in (train_folder, val_folder)]
@@ -27,7 +33,7 @@ class Reader(object):
 
     def get_base_feature(self):
         if FLAGS.split_bool:
-            return {
+            features = {
                 'floats': tf.VarLenFeature(tf.float32),
                 'bools': tf.VarLenFeature(tf.float32),
                 'num_floats': tf.FixedLenFeature([], tf.int64),
@@ -35,11 +41,16 @@ class Reader(object):
                 'num_timesteps': tf.FixedLenFeature([], tf.int64),
             }
         else:
-            return {
+            features = {
                 'values': tf.VarLenFeature(tf.float32),
                 'num_sensors': tf.FixedLenFeature([], tf.int64),
                 'num_timesteps': tf.FixedLenFeature([], tf.int64),
             }
+
+        for k in self.future_kv:
+            features[k] = tf.VarLenFeature(tf.float32)
+
+        return features
 
     def get_values(self, features):
         if FLAGS.split_bool:
@@ -82,7 +93,7 @@ class Reader(object):
         values, sizes, num_timesteps = self.read_and_decode(filename_queue, 1)
         coord = tf.train.Coordinator()
         # hack to get the number of sensors and timestamps before building the rest of the graph
-        with tf.Session() as sess:
+        with tf.Session(config=tf.ConfigProto(device_count={'GPU': 0})) as sess:
             print("Analyzing tfrecord data shapes...")
             sess.run(tf.global_variables_initializer())
             threads = tf.train.start_queue_runners(sess=sess, coord=coord)
@@ -109,8 +120,14 @@ class Reader(object):
         
         dense_values = [tf.reshape(tf.sparse_tensor_to_dense(v, default_value=0), shape) for v, shape in zip(values, shapes)]
         concat_values = tf.concat(dense_values, axis=-1)
-        framed_values = tf.contrib.signal.frame(concat_values[:-1], FLAGS.rnn_timesteps, 1, axis=0)
-        return concat_values, framed_values, sizes, num_timesteps
+        frame = lambda x: tf.contrib.signal.frame(x[:-1], FLAGS.rnn_timesteps, 1, axis=0)
+        framed_values = frame(concat_values)
+        future, future_shape = {}, (shapes[0][0], sum(map(lambda t: t[1], shapes)))
+        for k in self.future_kv:
+            dense = tf.reshape(tf.sparse_tensor_to_dense(features[k], default_value=0), future_shape)
+            # framed = frame(dense)
+            future[k] = dense
+        return concat_values, framed_values, sizes, num_timesteps, future
 
 
     def dataset_batch(self, filenames, batch_size, parallel=32, buffer_size=1000, shape=None):
@@ -123,7 +140,7 @@ class Reader(object):
         
         parser = lambda ex: self.parse_example(ex, shape)
         dataset = dataset.map(parser, num_parallel_calls=parallel)
-        if FLAGS.shuffle:
+        if FLAGS.shuffle and False:
             # dataset = dataset.shuffle(buffer_size=buffer_size)
             dataset = dataset.apply(tf.contrib.data.shuffle_and_repeat(buffer_size=buffer_size))
         else:
@@ -148,8 +165,9 @@ class Reader(object):
 
     def read(self, batch_size, val, shape=None):
         train_batch, val_batch = [self.dataset_batch(f, batch_size, shape=shape) for f in (self.train_records, self.val_records)]
-        dense_values, frame_values, num_sensors, num_timesteps = tf.cond(val, lambda: val_batch, lambda: train_batch)
-        return dense_values, frame_values, num_sensors, num_timesteps
+        # args: dense_values, frame_values, num_sensors, num_timesteps, future
+        args = tf.cond(val, lambda: val_batch, lambda: train_batch)
+        return args
 
 
     def stream(self, batch_size, shape=None, val=False, count=None):

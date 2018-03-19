@@ -10,8 +10,10 @@ from reader import Reader
 
 tf.app.flags.DEFINE_integer("batch_size", 32, "Batch size to use during training.")
 tf.app.flags.DEFINE_integer("epochs", 10, "Number of epochs to train for")
+tf.app.flags.DEFINE_float("lr_decay", 0.9, "Learning rate decay per epoch")
 tf.app.flags.DEFINE_bool("restore", False, "Whether to restore from save_path")
 tf.app.flags.DEFINE_bool("validate", True, "Whether to run validation")
+tf.app.flags.DEFINE_bool("validate_only", False, "Whether to only run validation")
 
 tf.app.flags.DEFINE_integer("cuda_device", 3, "Which gpu to run on")
 tf.app.flags.DEFINE_string('graph', './graphs', 'Where to save graph/tensorboard output')
@@ -26,6 +28,7 @@ class Model(object):
     def __init__(self, flags):
         super(Model, self).__init__()
         self.flags = flags
+        self.validate_only = self.flags.validate_only
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.flags.cuda_device)
         self.batch_size = flags.batch_size
         self.reader = Reader()        
@@ -48,9 +51,10 @@ class Model(object):
 
     def _setup_model(self):
         self.val = tf.placeholder_with_default(False, [], name='validation')
-        self.dense_values, self.frame_values, sensor_counts, num_timesteps = self.reader.read(self.batch_size, val=self.val)
+        self.dense_values, self.frame_values, sensor_counts, num_timesteps, self.future = self.reader.read(self.batch_size, val=self.val)
         self.predicted, self.expected = None, None
-        self.global_step_tensor = tf.Variable(0, trainable=False, name='global_step')
+        if not self.flags.validate_only:
+            self.global_step_tensor = tf.Variable(0, trainable=False, name='global_step')
         # Note: override self.predicted and self.expected in build_model
 
 
@@ -70,7 +74,9 @@ class Model(object):
         self.loss += self.float_loss
         self.mse = tf.losses.mean_squared_error(self.expected, self.predicted)
         self.abs_diff = tf.losses.absolute_difference(self.expected, self.predicted)
-        self.opt = tf.train.AdamOptimizer().minimize(self.loss)
+        if not self.validate_only:
+            self.learning_rate = tf.train.exponential_decay(1E-3, self.global_step_tensor, decay_steps=self.train_steps, decay_rate=self.flags.lr_decay)
+            self.opt = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss, global_step=self.global_step_tensor)
 
 
     def setup_tensorboard(self):
@@ -170,8 +176,13 @@ class Model(object):
                 predicted.append(predict_batch)
                 expected.append(expect_batch)
             else:
-                measured, summary, global_step = self.sess.run([metrics, self.val_summary, self.global_step_tensor], feed_dict=fd)
+                args = [metrics, self.val_summary]
+                if not self.flags.validate_only:
+                    args.append(self.global_step_tensor)
+                arg_results = self.sess.run(args, feed_dict=fd)
+                measured, summary = arg_results[:2]
                 if write_tensorboard:
+                    global_step = arg_results[-1]
                     self.writer.add_summary(summary, global_step=global_step)
             
             for name, value in measured.items():
