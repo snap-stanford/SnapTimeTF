@@ -7,10 +7,13 @@ import numpy as np
 from tqdm import tqdm, trange
 
 tf.app.flags.DEFINE_integer("rnn_timesteps", 10, "Number of timesteps used in rnn.")
-tf.app.flags.DEFINE_string("data_folder", '/dfs/scratch0/mvc/test/snap_tf/full_split_bool', 'Train tfrecord folder')
+tf.app.flags.DEFINE_string("data_folder", '/dfs/scratch0/mvc/test/snap_tf/test_future_with_ts', 'Train tfrecord folder')
 tf.app.flags.DEFINE_string("meta_file", 'meta_counts.pkl', "pickle file for metadata on tfrecords")
+tf.app.flags.DEFINE_string("driver_file", '', "specific file for driver, empty to use all")
 tf.app.flags.DEFINE_bool("split_bool", True, "If we separate bools from floats in example")
 tf.app.flags.DEFINE_bool("shuffle", True, "Whether to shuffle examples")
+tf.app.flags.DEFINE_bool("include_ts", True, "Whether the tfrecords contain a timestamp")
+tf.app.flags.DEFINE_bool("use_test", False, "Whether to use test (as opposed to validation) records")
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -25,9 +28,15 @@ class Reader(object):
             with open(future_file_path, 'rb') as f:
                 self.future_kv = pickle.load(f)
 
-        train_folder, val_folder = [os.path.join(data_folder, s) for s in ('train', 'val')]
-        self.train_records, self.val_records =\
-            [glob.glob(f + '/*.tfrecord') for f in (train_folder, val_folder)]
+        folders = [os.path.join(data_folder, s) for s in ('train', 'val', 'test')]
+        train_folder, val_folder, test_folder = folders
+        glob_str = '/*.tfrecord'
+        if FLAGS.driver_file:
+            glob_str = '/{}'.format(FLAGS.driver_file)
+        self.train_records, self.val_records, self.test_records =\
+            [glob.glob(f + glob_str) for f in folders]
+
+        self.all_records = self.train_records + self.val_records + self.test_records
 
         self.shapes = None
 
@@ -49,6 +58,9 @@ class Reader(object):
 
         for k in self.future_kv:
             features[k] = tf.VarLenFeature(tf.float32)
+
+        if FLAGS.include_ts:
+            features['ts'] = tf.FixedLenFeature([], tf.string)
 
         return features
 
@@ -127,10 +139,13 @@ class Reader(object):
             dense = tf.reshape(tf.sparse_tensor_to_dense(features[k], default_value=0), future_shape)
             # framed = frame(dense)
             future[k] = dense
-        return concat_values, framed_values, sizes, num_timesteps, future
+        args = {}
+        if FLAGS.include_ts:
+            args['ts'] = features['ts']
+        return concat_values, framed_values, sizes, num_timesteps, future, args
 
 
-    def dataset_batch(self, filenames, batch_size, parallel=32, buffer_size=1000, shape=None):
+    def dataset_batch(self, filenames, batch_size, parallel=8, buffer_size=1000, shape=None):
         if FLAGS.shuffle:
             dataset = tf.data.Dataset.from_tensor_slices(filenames).interleave(tf.data.TFRecordDataset, cycle_length=len(filenames))
         else:
@@ -150,29 +165,38 @@ class Reader(object):
         iterator = dataset.make_one_shot_iterator()
         results = iterator.get_next()
         return results
+
+    def full_meta_counts(self):
+        with open(os.path.join(FLAGS.data_folder, 'meta_counts.pkl'), 'rb') as handle:
+            d = pickle.load(handle)
+        return d
     
 
     def meta_counts(self):
-        with open(os.path.join(FLAGS.data_folder, 'meta_counts.pkl'), 'rb') as handle:
-            d = pickle.load(handle)
-        train_count, val_count = [sum([v for k, v in d.items() if identifier in k]) for identifier in ('train', 'val')]
-        return train_count, val_count
+        d = self.full_meta_counts()
+        sub = lambda x: x.replace('/dfs/scratch0/mvc/test/snap_tf/', '')
+        return [sum([d[sub(k)] for k in records]) for records in (self.train_records, self.val_records, self.test_records)]
+        # return [sum([v for k, v in d.items() if identifier in k]) for identifier in ('train', 'val', 'test')]
 
 
     def batch_meta_counts(self, batch_size):
         return [1+x//batch_size for x in self.meta_counts()]
 
 
-    def read(self, batch_size, val, shape=None):
-        train_batch, val_batch = [self.dataset_batch(f, batch_size, shape=shape) for f in (self.train_records, self.val_records)]
+    def read(self, batch_size, val, filenames=None, shape=None):
+        train_batch, val_batch, test_batch = [self.dataset_batch(f, batch_size, shape=shape) for f in (self.train_records, self.val_records, self.test_records)]
         # args: dense_values, frame_values, num_sensors, num_timesteps, future
-        args = tf.cond(val, lambda: val_batch, lambda: train_batch)
+        val_data = test_batch if FLAGS.use_test else val_batch
+        args = tf.cond(val, lambda: val_data, lambda: train_batch)
+        if filenames is not None:
+            args = self.dataset_batch(filenames, batch_size, shape=shape)
         return args
 
 
     def stream(self, batch_size, shape=None, val=False, count=None):
+        # returns as tuple: concat_values, framed_values, sizes, num_timesteps, future, args
         val_placeholder = tf.placeholder_with_default(val, [], name='validation')
-        args = self.read(batch_size, shape, val_placeholder)
+        args = self.read(batch_size, val_placeholder)
         if count is None:
             count = self.meta_counts()[val^1]
         with tf.Session() as sess:
@@ -180,3 +204,12 @@ class Reader(object):
                 elems = sess.run(args)
                 yield elems
 
+
+def main(_):
+    reader = Reader()
+    reader.get_shapes()
+    elems = reader.stream(1).next()
+    import pdb; pdb.set_trace()
+
+if __name__ == '__main__':
+    tf.app.run()
